@@ -1,6 +1,6 @@
 /**
  * Secrets & Revelations Tracker (SillyTavern Extension)
- * v0.5.0 — Auto-scan chat for secrets + live reveal detection
+ * v0.5.3 — Auto-scan chat for secrets + live reveal detection
  *
  * New features:
  *  - "Сканировать чат" — AI анализирует историю чата и предлагает секреты
@@ -505,6 +505,7 @@ ${history}
       const added = addedNpc + addedUser + addedMutual;
 
       await saveMetadata();
+      await saveBackup();
       await updateInjectedPrompt();
       await renderDrawer();
 
@@ -571,6 +572,7 @@ ${history}
     if (changed) {
       await saveMetadata();
       await updateInjectedPrompt();
+      await saveBackup();
       if ($('#srt_drawer').hasClass('srt-open')) renderDrawer();
     }
   }
@@ -987,6 +989,7 @@ ${history}
     }
 
     await saveMetadata();
+    await saveBackup();
     await updateInjectedPrompt();
     await renderDrawer();
   }
@@ -997,6 +1000,7 @@ ${history}
     const idx = list.findIndex(x => x.id === id);
     if (idx >= 0) list.splice(idx, 1);
     await ctx().saveMetadata();
+    await saveBackup();
     await updateInjectedPrompt();
     await renderDrawer();
   }
@@ -1006,6 +1010,7 @@ ${history}
     if (kind === 'npc') { const it = state.npcSecrets.find(x => x.id === id); if (it) it.knownToUser = value; }
     if (kind === 'user') { const it = state.userSecrets.find(x => x.id === id); if (it) it.knownToNpc = value; }
     await ctx().saveMetadata();
+    await saveBackup();
     await updateInjectedPrompt();
   }
 
@@ -1128,33 +1133,203 @@ ${history}
     );
   }
 
+  // ─── Backup helpers ──────────────────────────────────────────────────────────
+
+  const BACKUP_KEY = 'srt_backup_v1'; // localStorage — выживает при любых сбоях ST
+
+  // Сохраняем бэкап в localStorage (до 5 слотов, по одному на чат-ключ)
+  async function saveBackup() {
+    try {
+      const state  = await getChatState();
+      const key    = currentChatBoundKey();
+      const raw    = localStorage.getItem(BACKUP_KEY);
+      const store  = raw ? JSON.parse(raw) : {};
+      store[key] = {
+        ts:    Date.now(),
+        state: structuredClone(state),
+      };
+      // Держим не больше 10 слотов — удаляем самые старые
+      const entries = Object.entries(store).sort((a,b) => (b[1].ts||0) - (a[1].ts||0));
+      const trimmed = Object.fromEntries(entries.slice(0, 10));
+      localStorage.setItem(BACKUP_KEY, JSON.stringify(trimmed));
+    } catch (e) {
+      console.warn('[SRT] saveBackup failed', e);
+    }
+  }
+
+  function loadBackup() {
+    try {
+      const raw   = localStorage.getItem(BACKUP_KEY);
+      if (!raw) return null;
+      const store = JSON.parse(raw);
+      const key   = currentChatBoundKey();
+      return store[key] ?? null;
+    } catch { return null; }
+  }
+
+  // Скачиваем JSON-файл на устройство
+  function downloadJson(filename, obj) {
+    const blob = new Blob([JSON.stringify(obj, null, 2)], { type: 'application/json' });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href = url; a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1000);
+  }
+
+  // Валидируем и нормализуем импортированный объект
+  function validateImport(p) {
+    if (!p || typeof p !== 'object') throw new Error('Не объект');
+    return {
+      npcLabel:      typeof p.npcLabel === 'string' ? p.npcLabel : '{{char}}',
+      npcSecrets:    Array.isArray(p.npcSecrets)    ? p.npcSecrets    : [],
+      userSecrets:   Array.isArray(p.userSecrets)   ? p.userSecrets   : [],
+      mutualSecrets: Array.isArray(p.mutualSecrets) ? p.mutualSecrets : [],
+    };
+  }
+
+  // ─── Export ───────────────────────────────────────────────────────────────────
+
   async function exportJson() {
-    const state = await getChatState();
-    await ctx().Popup.show.text('Экспорт SRT', `<pre style="white-space:pre-wrap">${escapeHtml(JSON.stringify(state,null,2))}</pre>`);
+    const state    = await getChatState();
+    const npcName  = getActiveNpcNameForUi();
+    const ts       = new Date().toISOString().slice(0,19).replace('T','_').replace(/:/g,'-');
+    const filename = `srt_${npcName.replace(/[^a-zа-яёA-ZА-ЯЁ0-9]/gi,'_').slice(0,30)}_${ts}.json`;
+    const json     = JSON.stringify(state, null, 2);
+    const total    = state.npcSecrets.length + state.userSecrets.length + state.mutualSecrets.length;
+
+    await ctx().Popup.show.text('💾 Экспорт секретов',
+      `<div style="font-family:Consolas,monospace;font-size:12px">
+        <div style="margin-bottom:10px;opacity:.8">
+          Персонаж: <b>${escapeHtml(npcName)}</b> · Секретов всего: <b>${total}</b>
+        </div>
+        <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap">
+          <button id="srt_export_download" style="padding:8px 14px;background:rgba(46,204,113,0.15);border:1px solid rgba(46,204,113,0.5);color:#2ecc71;border-radius:8px;cursor:pointer;font-size:13px">
+            ⬇️ Скачать файл
+          </button>
+          <button id="srt_export_copy" style="padding:8px 14px;background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.2);color:#eee;border-radius:8px;cursor:pointer;font-size:13px">
+            📋 Скопировать JSON
+          </button>
+        </div>
+        <pre id="srt_export_pre" style="white-space:pre-wrap;max-height:50vh;overflow:auto;background:rgba(0,0,0,0.3);padding:10px;border-radius:8px;font-size:11px">${escapeHtml(json)}</pre>
+      </div>`
+    );
+
+    // Вешаем обработчики после рендера попапа
+    document.getElementById('srt_export_download')?.addEventListener('click', () => {
+      downloadJson(filename, state);
+      toastr.success(`Файл "${filename}" сохранён`);
+    });
+    document.getElementById('srt_export_copy')?.addEventListener('click', () => {
+      navigator.clipboard?.writeText(json).then(
+        () => toastr.success('JSON скопирован в буфер обмена'),
+        () => toastr.error('Не удалось скопировать — выдели текст вручную')
+      );
+    });
+  }
+
+  // ─── Import ───────────────────────────────────────────────────────────────────
+
+  async function importJson() {
+    const backup  = loadBackup();
+    const backupTs = backup ? new Date(backup.ts).toLocaleString('ru') : null;
+    const backupTotal = backup
+      ? (backup.state.npcSecrets?.length||0) + (backup.state.userSecrets?.length||0) + (backup.state.mutualSecrets?.length||0)
+      : 0;
+
+    // Показываем диалог с тремя вариантами
+    await ctx().Popup.show.text('📂 Импорт секретов',
+      `<div style="font-family:Consolas,monospace;font-size:12px">
+
+        ${backup ? `
+        <div style="margin-bottom:14px;padding:10px;background:rgba(46,204,113,0.08);border:1px solid rgba(46,204,113,0.3);border-radius:8px">
+          <div style="color:#2ecc71;font-weight:700;margin-bottom:4px">💾 Авто-бэкап найден</div>
+          <div style="opacity:.85">Сохранён: ${escapeHtml(backupTs)} · Секретов: ${backupTotal}</div>
+          <button id="srt_import_from_backup" style="margin-top:8px;padding:7px 14px;background:rgba(46,204,113,0.2);border:1px solid rgba(46,204,113,0.5);color:#2ecc71;border-radius:8px;cursor:pointer;font-size:12px">
+            ✅ Восстановить из бэкапа
+          </button>
+        </div>` : `
+        <div style="margin-bottom:14px;padding:8px 10px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.1);border-radius:8px;opacity:.7">
+          ℹ️ Авто-бэкап для этого чата не найден
+        </div>`}
+
+        <div style="margin-bottom:10px;font-weight:700;opacity:.9">Загрузить из файла или вставить JSON:</div>
+        <div style="display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap">
+          <button id="srt_import_file_btn" style="padding:8px 14px;background:rgba(52,152,219,0.15);border:1px solid rgba(52,152,219,0.5);color:#5dade2;border-radius:8px;cursor:pointer;font-size:13px">
+            📁 Выбрать файл (.json)
+          </button>
+        </div>
+        <input type="file" id="srt_import_file_input" accept=".json,application/json" style="display:none">
+
+        <textarea id="srt_import_textarea" placeholder="…или вставь JSON сюда вручную"
+          style="width:100%;height:120px;background:rgba(0,0,0,0.3);border:1px solid rgba(255,255,255,0.15);color:#eee;border-radius:8px;padding:8px;font-family:Consolas,monospace;font-size:11px;resize:vertical;box-sizing:border-box"></textarea>
+        <div style="display:flex;gap:8px;margin-top:8px">
+          <button id="srt_import_apply" style="padding:8px 14px;background:rgba(231,76,60,0.15);border:1px solid rgba(231,76,60,0.5);color:#e74c3c;border-radius:8px;cursor:pointer;font-size:13px">
+            ⬆️ Применить JSON
+          </button>
+          <span id="srt_import_status" style="font-size:11px;opacity:.75;align-self:center"></span>
+        </div>
+      </div>`
+    );
+
+    // Восстановить из бэкапа
+    document.getElementById('srt_import_from_backup')?.addEventListener('click', async () => {
+      try {
+        const p = validateImport(backup.state);
+        await applyImport(p);
+        toastr.success(`✅ Восстановлено из бэкапа (${backupTs})`);
+      } catch(e) { toastr.error(`Ошибка восстановления: ${e.message}`); }
+    });
+
+    // Кнопка выбора файла
+    document.getElementById('srt_import_file_btn')?.addEventListener('click', () => {
+      document.getElementById('srt_import_file_input')?.click();
+    });
+
+    // Читаем файл
+    document.getElementById('srt_import_file_input')?.addEventListener('change', (ev) => {
+      const file = ev.target.files?.[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        const text = e.target.result;
+        document.getElementById('srt_import_textarea').value = text;
+        document.getElementById('srt_import_status').textContent = `📄 Загружен: ${file.name}`;
+      };
+      reader.onerror = () => toastr.error('Не удалось прочитать файл');
+      reader.readAsText(file);
+    });
+
+    // Применить JSON из textarea
+    document.getElementById('srt_import_apply')?.addEventListener('click', async () => {
+      const raw = document.getElementById('srt_import_textarea')?.value?.trim();
+      if (!raw) { toastr.warning('Вставьте JSON или выберите файл'); return; }
+      try {
+        const p = validateImport(JSON.parse(raw));
+        await applyImport(p);
+        toastr.success('✅ Импорт выполнен успешно');
+      } catch(e) {
+        toastr.error(`Ошибка импорта: ${e.message}`);
+        document.getElementById('srt_import_status').textContent = `❌ ${e.message}`;
+      }
+    });
+  }
+
+  // Применяет провалидированный объект как текущее состояние чата
+  async function applyImport(p) {
+    const { saveMetadata, chatMetadata } = ctx();
+    const key = currentChatBoundKey();
+    chatMetadata[key] = p;
+    await saveMetadata();
+    await saveBackup(); // сразу бэкапим то что только что импортировали
+    await updateInjectedPrompt();
+    await renderDrawer();
   }
 
   async function showPromptPreview() {
     const state = await getChatState();
     await ctx().Popup.show.text('Промпт SRT', `<pre style="white-space:pre-wrap;max-height:60vh;overflow:auto">${escapeHtml(buildPromptBlock(state))}</pre>`);
-  }
-
-  async function importJson() {
-    const { Popup, saveMetadata, chatMetadata } = ctx();
-    const raw = await Popup.show.input('Импорт SRT', 'Вставьте JSON:', '');
-    if (!raw) return;
-    try {
-      const p = JSON.parse(raw);
-      if (!p || typeof p !== 'object') throw new Error('Not an object');
-      p.npcSecrets    = Array.isArray(p.npcSecrets)    ? p.npcSecrets    : [];
-      p.userSecrets   = Array.isArray(p.userSecrets)   ? p.userSecrets   : [];
-      p.mutualSecrets = Array.isArray(p.mutualSecrets) ? p.mutualSecrets : [];
-      p.npcLabel      = typeof p.npcLabel === 'string' ? p.npcLabel      : '{{char}}';
-      chatMetadata[CHAT_KEY] = p;
-      await saveMetadata();
-      await updateInjectedPrompt();
-      toastr.success('Импортировано');
-      renderDrawer();
-    } catch (e) { console.error('[SRT] import failed', e); toastr.error('Неверный JSON'); }
   }
 
   // ─── Settings panel ──────────────────────────────────────────────────────────
@@ -1362,7 +1537,7 @@ ${history}
   // ─── Boot ────────────────────────────────────────────────────────────────────
 
   jQuery(() => {
-    try { wireChatEvents(); console.log('[SRT] v0.5.0 loaded'); }
+    try { wireChatEvents(); console.log('[SRT] v0.5.3 loaded'); }
     catch (e) { console.error('[SRT] init failed', e); }
   });
 
