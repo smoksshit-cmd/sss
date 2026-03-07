@@ -7,9 +7,9 @@
   "css": [
     "style.css"
   ],
-  "author": "SmokshiwithTimwithDomineza",
-  "version": "0.5.0",
+  "author": "YOUR_NAME_HERE",
+  "version": "0.5.3",
   "auto_update": true,
-  "homepage": "https://github.com/smoksshit-cmd/SillyTavern-SecretsRevelationsTracker",
+  "homepage": "https://github.com/YOUR_GITHUB/SillyTavern-SecretsRevelationsTracker",
   "requires": []
 }
